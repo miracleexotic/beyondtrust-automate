@@ -1,6 +1,7 @@
-import sys, os, traceback, multiprocessing, urllib3
+import sys, os, multiprocessing, urllib3
 from time import sleep
 from appium import webdriver
+from selenium.webdriver import ActionChains
 import pyautogui
 
 
@@ -9,26 +10,39 @@ class DevMode:
     DEVMODE_ON = ("reg", "add", "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock", "/t", "REG_DWORD", "/f", "/v", "AllowDevelopmentWithoutDevLicense", "/d", "1")
     DEVMODE_OFF = ("reg", "add", "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock", "/t", "REG_DWORD", "/f", "/v", "AllowDevelopmentWithoutDevLicense", "/d", "0")
 
-    def isUserAdmin(self):
+    def __init__(self, debug=False) -> None:
+        self.debug = debug
+        self._is_admin = False
 
-        if os.name == 'nt':
+    @property
+    def is_admin(self):
+        return self._is_admin
+
+    def isUserAdmin(self):
+        self._os_name = os.name
+
+        if self._os_name == 'nt':
             import ctypes
             # WARNING: requires Windows XP SP2 or higher!
             try:
-                return ctypes.windll.shell32.IsUserAnAdmin()
-            except:
-                traceback.print_exc()
-                print("Admin check failed, assuming not an admin.")
-                return False
-        elif os.name == 'posix':
+                self._is_admin = ctypes.windll.shell32.IsUserAnAdmin()
+            except Exception as e:
+                print("Error [DevMode]:", e)
+                print("\t- Admin check failed, assuming not an admin.")
+            
+        elif self._os_name == 'posix':
             # Check for root on Posix
             return os.getuid() == 0
+        
         else:
-            raise RuntimeError("Unsupported operating system for this module: %s" % (os.name,))
+            raise RuntimeError(f"Unsupported operating system for this module: {self._os_name}")
+        
+        return self._is_admin
 
     def runAsAdmin(self, cmdLine=None, wait=True):
+        self._os_name = os.name
 
-        if os.name != 'nt':
+        if self._os_name != 'nt':
             raise RuntimeError("This function is only implemented on Windows.")
 
         import win32con, win32event, win32process
@@ -39,12 +53,13 @@ class DevMode:
 
         if cmdLine is None:
             cmdLine = [python_exe] + sys.argv
+
         elif not (isinstance(cmdLine, tuple) or 
-                isinstance(cmdLine, list)):
+                  isinstance(cmdLine, list)):
             raise ValueError("cmdLine is not a sequence.")
         
-        cmd = '"%s"' % (cmdLine[0],)
-        params = " ".join(['"%s"' % (x,) for x in cmdLine[1:]])
+        cmd = f'"{cmdLine[0]}"'
+        params = " ".join([f'"{x}"' for x in cmdLine[1:]])
         cmdDir = ''
         showCmd = win32con.SW_HIDE
         lpVerb = 'runas'  # causes UAC elevation prompt.
@@ -55,13 +70,13 @@ class DevMode:
                                 lpDirectory=cmdDir,
                                 lpFile=cmd,
                                 lpParameters=params)
-        print("\t-", procInfo)
+        if self.debug: print("\t-", procInfo)
 
         if wait:
             procHandle = procInfo['hProcess']    
             obj = win32event.WaitForSingleObject(procHandle, win32event.INFINITE)
             rc = win32process.GetExitCodeProcess(procHandle)
-            print("\t- Process handle %s returned code %s" % (procHandle, rc))
+            if self.debug: print("\t- Process handle %s returned code %s" % (procHandle, rc))
         else:
             rc = None
 
@@ -76,10 +91,24 @@ class DevMode:
     def OFF():
         print("Developer Mode: OFF")
         return DevMode().runAsAdmin(DevMode.DEVMODE_OFF)
+    
+    def __enter__(self):
+        print("Running with Enable Developer Mode...")
+        if self.isUserAdmin():
+            self.runAsAdmin(DevMode.DEVMODE_ON)
+        else:
+            print("\t- Not Admin user: access is denied.")
+        
+        return self
+
+    def __exit__(self, exc_type, exc_value, exc_tb):
+        if self.isUserAdmin():
+            self.runAsAdmin(DevMode.DEVMODE_OFF)
 
 class WinAppDriver:
 
-    def __init__(self) -> None:
+    def __init__(self, debug=False) -> None:
+        self.debug = debug
         self._stop = multiprocessing.Event()
 
     def _run(self, event):
@@ -92,25 +121,25 @@ class WinAppDriver:
         cmdDir = r'C:\Program Files\Windows Application Driver'
         showCmd = win32con.SW_HIDE
 
-        print("Start process [WinAppDriver]:", end=" ")
+        if self.debug: print("Start process [WinAppDriver]:", end=" ")
         try:
             procInfo = ShellExecuteEx(nShow=showCmd,
                                     fMask=shellcon.SEE_MASK_NOCLOSEPROCESS,
                                     lpDirectory=cmdDir,
                                     lpFile=cmd)
-            print(procInfo)
+            if self.debug: print(procInfo)
         except Exception as e:
             print("Failed: WinAppDriver can't Running. \n\t-", e)
         procHandle = procInfo['hProcess'] 
 
         event.wait()
         if event.is_set():
-            print("End process [WinAppDriver]:", procHandle)
+            if self.debug: print("End process [WinAppDriver]:", procHandle)
 
             try:
                 win32process.TerminateProcess(procHandle, 0)
             except Exception as e:
-                print("Failed: WinAppDriver can't terminate. \n\t-", e)
+                if self.debug: print("Failed: WinAppDriver can't terminate. \n\t-", e)
 
     def run(self):
         self.proc = multiprocessing.Process(target=self._run, args=(self._stop,))
@@ -120,10 +149,16 @@ class WinAppDriver:
         self._stop.set()
         self.proc.join()
 
+    def __enter__(self):
+        self.run()
+
+    def __exit__(self, exc_type, exc_value, exc_tb):
+        self.close()
+
 
 def kill_app(name):
     try:
-        os.system(f"taskkill /f /im  {name}")
+        os.system(f"taskkill /f /im  \"{name}\"")
     except Exception as e:
         print(f"Error: Can't Terminate current app[{name}] \n\t-", e)
 
@@ -131,46 +166,40 @@ def clear_text():
     pyautogui.hotkey("ctrl", "a")
     pyautogui.press("backspace")
 
-def replace(msg):
+def replaceText(msg):
     clear_text()
     pyautogui.write(msg)
 
-username = sys.argv[1]
-password = sys.argv[2]
+def loopTab(number):
+    for _ in range(number):
+        pyautogui.press('tab')
 
-APP_EXE_PATH = r"C:\Program Files\DBeaver\dbeaver.exe"  # -- Path to .exe file that you want to automate.
 
-def workflow(driver):
+ip_address = sys.argv[1]
+port = sys.argv[2]
+username = sys.argv[3]
+password = sys.argv[4]
+
+APP_EXE_PATH = r"C:\Program Files\Quest Software\Toad Edge\ToadEdge.exe"  # -- Path to .exe file that you want to automate.
+
+def workflow(driver: webdriver.Remote):
     """Edit Workflow to automate."""
 
     # === Start automation zone ===
     
-    driver.find_element_by_xpath('//*[@Name="Application"][@LocalizedControlType="menu bar"]').click()
-    driver.find_element_by_xpath('//*[@Name="Database"][@LocalizedControlType="menu item"]').click()
-    driver.find_element_by_xpath('//*[@Name="New Database Connection"][@LocalizedControlType="menu item"]').click()
-    pyautogui.write("SQL Server")
+    driver.find_element_by_xpath('//*[@Name="MySQL"][@LocalizedControlType="check box"]').click()
+    replaceText(ip_address)
+    loopTab(1)
     sleep(1)
-    pyautogui.press("enter")
-    pyautogui.press("enter")
-    driver.find_element_by_xpath('//*[@Name="Host"][@LocalizedControlType="radio button"]').click()
-    driver.find_element_by_xpath('//Edit[@Name="Host:"]').click()
-    replace("10.1.8.200")
-    sleep(0.5)
-    driver.find_element_by_xpath('//Edit[@Name="Port:"]').click()
-    replace("1433")
-    sleep(0.5)
-    driver.find_element_by_xpath('//Edit[@Name="Database/Schema:"]').click()
-    replace("master")
-    sleep(0.5)
-    driver.find_element_by_xpath('//Edit[@Name="Username:"]').click()
-    replace(username)
-    sleep(0.5)
-    driver.find_element_by_xpath('//Edit[@Name=""]').click()
-    replace(password)
-    sleep(0.5)
-    driver.find_element_by_xpath('//Button[@Name="Finish"]').click()
+    replaceText(port)
+    loopTab(2)
     sleep(1)
-    pyautogui.press("enter")
+    replaceText(username)
+    loopTab(1)
+    sleep(1)
+    replaceText(password)
+    sleep(1)
+    driver.find_element_by_xpath('//*[@Name="Connect"][@LocalizedControlType="button"]').click()
 
     # === End automation zone ===
 
@@ -180,37 +209,34 @@ if __name__ == '__main__':
     is_complete = False
     failed_count = 0
 
-    DevMode.ON()
+    with DevMode() as dm:
+        while not (is_complete or failed_count >= 3) and dm.is_admin:
+            with WinAppDriver(debug=True):
+                try:
+                    driver = webdriver.Remote(command_executor='http://127.0.0.1:4723', desired_capabilities= {
+                        "app": APP_EXE_PATH
+                    })
+                except Exception as e:
+                    print("Error:", e)
+                    failed_count += 1
 
-    while not (is_complete or failed_count >= 3):
+                    desktopSession = webdriver.Remote(command_executor='http://127.0.0.1:4723', desired_capabilities= {
+                        "app": "Root"
+                    })
+                    desktopSession.find_element_by_xpath(f'//*[@Name="Toad Edge - 1 running window"]').click()
+                    TopLevelWindow = desktopSession.find_element_by_xpath(f'//*[@Name="Toad Edge"][@LocalizedControlType="window"]')
+                    TopLevelWindowHandle = hex(int(TopLevelWindow.get_attribute("NativeWindowHandle")));
+                    driver = webdriver.Remote(command_executor='http://127.0.0.1:4723', desired_capabilities= {
+                        "appTopLevelWindow": TopLevelWindowHandle
+                    })
 
-        wad = WinAppDriver()
+                try:
+                    workflow(driver)
+                    is_complete = True
+                except urllib3.exceptions.MaxRetryError:
+                    print("Connection refused: \n\t- Please check dev-mode are Enable in windows.")
+                    failed_count += 1
 
-        try:
-
-            wad.run()
-
-            driver = webdriver.Remote(command_executor='http://127.0.0.1:4723', desired_capabilities= {
-                "app": APP_EXE_PATH
-            })
-
-            workflow(driver)
-
-            is_complete = True
-
-        except urllib3.exceptions.MaxRetryError:
-            print("Connection refused: \n\t- Please check dev-mode are Enable in windows.")
-            failed_count += 1
-
-        except Exception as e:
-            print("Error:", e)
-            failed_count += 1
-            kill_app(APP_EXE_PATH.split("\\")[-1])
-
-        finally:
-            wad.close()
-
-    DevMode.OFF()
     
 
     
