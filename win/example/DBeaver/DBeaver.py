@@ -172,7 +172,7 @@ def replace(msg):
 username = sys.argv[1]
 password = sys.argv[2]
 
-APP_EXE_PATH = r"C:\Program Files\DBeaver\dbeaver.exe"  # -- Path to .exe file that you want to automate.
+APP_EXE_PATH = r"C:\Users\nboonsodako\AppData\Local\DBeaver\dbeaver.exe"  # -- Path to .exe file that you want to automate.
 
 def workflow(driver):
     """Edit Workflow to automate."""
